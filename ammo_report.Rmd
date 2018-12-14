@@ -1,0 +1,698 @@
+---
+title: "10th Mountain Division Ammunition Report"
+author: "Division ORSAs"
+
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,fig.width = 10,dpi=200)
+
+library(ggplot2)
+library(readxl)
+library(tidyr)
+library(dplyr)
+library(scales)
+library(stringr)
+library(lubridate)
+library(ggalt)
+library(stringr)
+library(janitor)
+library(ggthemes)
+library(treemapify)
+```
+
+## Current Ammunition Status
+
+As of `r Sys.Date()`
+
+
+
+```{r include=FALSE}
+
+#The four reports below are your current data and need to be pulled from TAMIS for updated results.
+forecast_UIC <- read_excel("ForecastUIC.xlsx",skip = 8) %>%
+  mutate(FY=2018)#TAMIS Forecast UIC Detail Report. Check ASP option
+
+summary_forecast <- read_excel("SummaryForecast.xlsx",skip = 6) # TAMIS Summary Report
+
+expenditure_report <- read_excel("ExpenditureReport.xlsx",  # TAMIS Expenditure Changes Report
+                                 #Check Price, Quantity, Lot #, Issue Document Number, DODIC Document Number in optional report fields
+                                 #Check Issue, Turn-In, Expended in Expenditure Type options
+                                    col_types = c("text", "numeric", "text", 
+                                                  "text", "numeric", "numeric", "text", 
+                                                  "text", "numeric", "text", "text", 
+                                                  "text", "text", "text", "text", "numeric", 
+                                                  "numeric", "text", "date"), skip = 7) %>%
+  clean_names()
+
+  #For current year expenditure rates, you need to only examine completed documents or else your open documents will skew results
+doc_type <- read_excel("ReconciledDocs.xlsx",   #e581 Documents Report Detail Report.  Select Closed and Reconciled
+                        col_types = c("text", "text", "text", 
+                                      "text", "skip", "skip", "skip", 
+                                      "skip", "skip", "skip", "skip", 
+                                      "skip", "skip", "text"), skip = 7) %>%
+  distinct() %>%
+  clean_names()
+
+#The reports below are historical or relatively static.  Update occasionally to ensure accurate data.
+#Expenditure reports from the previous FY may not be accurate if you're running in the start of the next FY as documents will still be open.
+#Repull previous FY expenditure report after all documents have been closed (NOV-DEC)
+hierarchy <- read_excel("Hierarchy.xlsx",skip = 6) #TAMIS Hierarchy Levels Report
+
+requirements <- read_excel("Requirements.xlsx",skip = 6) #TAMIS Requirements Detail STRAC and POI Report
+
+expenditure_report18 <- read_excel("ExpenditureReport18.xlsx",  # TAMIS Expenditure Changes Report
+                                   #Check Price, Quantity, Lot #, Issue Document Number, DODIC Document Number in optional report fields
+                                   #Check Issue, Turn-In, Expended in Expenditure Type options
+                                   col_types = c("text", "numeric", "text", 
+                                                 "text", "numeric", "numeric", "text", 
+                                                 "text", "numeric", "text", "text", 
+                                                 "text", "text", "text", "text", "numeric", 
+                                                 "numeric", "text", "date"), skip = 7) %>%
+  clean_names()
+
+expenditure_report17 <- read_excel("ExpenditureReport17.xlsx",  
+                                 col_types = c("text", "numeric", "text", 
+                                               "text", "numeric", "numeric", "text", 
+                                               "text", "numeric", "text", "text", 
+                                               "text", "text", "text", "text", "numeric", 
+                                               "numeric", "text", "date"), skip = 7) %>%
+  clean_names()
+
+expenditure_report16 <- read_excel("ExpenditureReport16.xlsx", 
+                                   col_types = c("text", "numeric", "text", 
+                                                 "text", "numeric", "numeric", "text", 
+                                                 "text", "numeric", "text", "text", 
+                                                 "text", "text", "text", "text", "numeric", 
+                                                 "numeric", "text", "date"), skip = 7) %>%
+  clean_names()
+
+
+
+```
+
+
+
+```{r dataframes, echo=FALSE, warning=FALSE}
+hierarchy_list <- hierarchy %>%
+  clean_names() %>%
+  separate(location,c("HQDA","FORSCOM","Corps","DIV","BDE","BN","CO"),sep="\\\\") %>%
+  select(hierarchy_name,hierarchy_level,BDE,BN,CO)
+
+req_bde <- requirements %>%
+  clean_names() %>%
+  left_join(hierarchy_list,by=c("hierarchy_level")) %>%
+  group_by(BDE,dodic) %>%
+  summarise(req_qty=sum(na.omit(req_qty)))
+
+req_bn <- requirements %>%
+  clean_names() %>%
+  left_join(hierarchy_list,by=c("hierarchy_level")) %>%
+  group_by(BN,dodic) %>%
+  summarise(req_qty=sum(na.omit(req_qty)))
+
+reconciled <- doc_type %>%
+  filter(doc_status %in% c("Closed","Reconciled"))
+
+real_docs <- doc_type %>%
+  filter(doc_status %in% c("Closed","Reconciled","Active","Pending","Overdue"))
+
+real_docs_sum <- real_docs %>%
+  group_by(parent_name, doc_status) %>%
+  summarise(count = n())
+
+real_docs_sum$doc_status <- factor(real_docs_sum$doc_status,levels=c("Pending","Active","Overdue","Reconciled","Closed"))
+
+exp_issue <- expenditure_report %>%
+  clean_names() %>%
+  left_join(hierarchy_list,by="hierarchy_level") %>%
+  filter(expenditure_type=="I") %>%
+  group_by(asp,BDE,hierarchy_level,document_number,dpa,last_modified) %>%
+  summarise(IssueQty=sum(na.omit(quantity)),IssuePrice=sum(na.omit(total_price))) %>%
+  distinct()
+
+exp_ti <- expenditure_report %>%
+  clean_names() %>%
+  left_join(hierarchy_list,by="hierarchy_level") %>%
+  filter(expenditure_type=="T") %>%
+  group_by(asp,BDE,hierarchy_level,issue_document_number,dpa) %>%
+  summarise(TIQty=abs(sum(na.omit(quantity))),TIPrice=abs(sum(na.omit(total_price)))) %>%
+  distinct()
+
+exp_docnum <- exp_issue %>%
+  left_join(exp_ti,by=c("document_number"="issue_document_number","dpa")) %>%
+  distinct() %>%
+  left_join(reconciled,by=c("document_number"="doc_num")) %>%
+  filter(doc_status %in% "Reconciled" | doc_status %in% "Closed") %>%
+  select(-one_of(c("doc_status"))) %>%
+  replace_na(list(TIQty=0,TIPrice=0)) %>%
+  mutate(TIPct = TIQty/IssueQty) %>%
+  mutate(mth=floor_date(last_modified,unit="month")) %>%
+  mutate(month=tolower(month(mth,abbr = FALSE,label=TRUE)))
+#?month
+rm(exp_ti,exp_issue)
+
+exp_month <- exp_docnum %>%
+  ungroup() %>%
+  group_by(mth,month) %>%
+  summarise(issued=sum(IssueQty),turned_in=sum(TIQty))
+  
+exp_month[2,3:4] <- exp_month[2,3:4] + exp_month[1,3:4]
+exp_month <- exp_month[-1,]
+
+exp_month_bde <- exp_docnum %>%
+  ungroup() %>%
+  group_by(BDE.x,mth,month) %>%
+  summarise(issued=sum(na.omit(IssueQty)),turned_in=sum(na.omit(TIQty))) #%>%
+  #left_join(month_tbl,by=c("mth"="number"))
+
+exp_month_bn <- exp_docnum %>%
+  ungroup() %>%
+  group_by(hierarchy_level.x,mth,month) %>%
+  summarise(issued=sum(na.omit(IssueQty)),turned_in=sum(na.omit(TIQty))) #%>%
+  #left_join(month_tbl,by=c("mth"="number"))
+
+sum_rpt <- summary_forecast %>%
+  clean_names() %>%
+  select(dodic,dodic_description,requirements_total,expenditures_total,e581_total,rem_fore_total,unforecasted) %>%
+  mutate(cat=str_sub(dodic,1,1)) %>%  #Creates field "cat" based on first letter of DODIC to simplify
+  group_by(dodic,dodic_description) %>%  
+  summarise_at(c("requirements_total","expenditures_total","e581_total","rem_fore_total","unforecasted"),sum,na.rm=TRUE)
+
+sum_rpt_dodic_bang <- sum_rpt %>%
+  filter(dodic %in% c("A080","AB57","AB86","A075","A111","AB73","AB77","A557","A598")) %>%
+  `colnames<-`(c("dodic","Description","Requirement","Issued","Requested","Forecasted","Remaining Unforecasted")) %>%
+  gather("Status","Quantity",Issued:`Remaining Unforecasted`) 
+
+sum_rpt_dodic_boom <- sum_rpt %>%
+  filter(dodic %in% c("B519","BA15","BA30","C875","CA09","CA44","C445","DA51","G878")) %>%
+  `colnames<-`(c("dodic","Description","Requirement","Issued","Requested","Forecasted","Remaining Unforecasted")) %>%
+  gather("Status","Quantity",Issued:`Remaining Unforecasted`) 
+
+sum_rpt_dodic_bird <- sum_rpt %>%
+  filter(dodic %in% c("B118","HA11","HA13","HA18","PD68","WF97","CA30","PL64","PV82")) %>%
+  `colnames<-`(c("dodic","Description","Requirement","Issued","Requested","Forecasted","Remaining Unforecasted")) %>%
+  gather("Status","Quantity",Issued:`Remaining Unforecasted`)
+
+names(forecast_UIC) <- make.names(names(forecast_UIC))
+colnames(forecast_UIC) <- gsub("X.U.200E.","",colnames(forecast_UIC))
+
+req_bde_cat <- req_bde %>%
+  mutate(cat=str_sub(dodic,1,1)) %>%
+  group_by(BDE) %>%
+  summarise(req_qty=sum(na.omit(req_qty)))
+
+req_bn_cat <- req_bn %>%
+  mutate(cat=str_sub(dodic,1,1)) %>%
+  group_by(BN) %>%
+  summarise(req_qty=sum(na.omit(req_qty)))
+
+req_cat <- req_bde %>%
+  mutate(cat=str_sub(dodic,1,1)) %>%
+  ungroup() %>%
+  summarise(req_qty=sum(na.omit(req_qty)))
+
+sum_rpt_bn <- forecast_UIC %>%
+  clean_names() %>%
+  replace(is.na(.), 0) %>%
+  mutate(sum = rowSums(.[6:17])) %>%
+  mutate(cat=str_sub(dodic,1,1)) %>%
+  left_join(hierarchy_list,by=c("macom"="hierarchy_level")) %>%
+  gather(key="month","quantity",october:september) %>%
+  group_by(macom,month) %>%
+  summarise(qty=sum(na.omit(quantity))) %>%
+  left_join(req_bn_cat,by=c("macom"="BN")) %>%
+  left_join(exp_month_bn,by=c("month","macom"="hierarchy_level.x")) %>%
+  dplyr::arrange(macom,factor(month,levels=c(c("october","november","december","january",
+                                             "february","march","april","may","june","july","august","september")))) %>%
+  mutate(percent=qty/req_qty) %>%
+  mutate(cumpercent=cumsum(percent),ti_percent=turned_in/issued,exp_percent=1-ti_percent)
+
+sum_rpt_bde <- forecast_UIC %>%
+  clean_names() %>%
+  replace(is.na(.), 0) %>%
+  mutate(sum = rowSums(.[6:17])) %>%
+  mutate(cat=str_sub(dodic,1,1)) %>%
+  left_join(hierarchy_list,by=c("macom"="hierarchy_level")) %>%
+  gather(key="month","quantity",october:september) %>%
+  group_by(BDE,month) %>%
+  summarise(qty=sum(na.omit(quantity))) %>%
+  left_join(req_bde_cat,by=c("BDE")) %>%
+  left_join(exp_month_bde,by=c("month","BDE"="BDE.x")) %>%
+  dplyr::arrange(BDE,factor(month,levels=c(c("october","november","december","january",
+                                             "february","march","april","may","june","july","august","september")))) %>%
+  mutate(percent=qty/req_qty) %>%
+  mutate(exp_pct=1-(turned_in/issued),cum_issue=cumsum(issued),cum_exp=cumsum(issued-turned_in),cum_percent=cum_exp/cum_issue)
+
+sum_rpt_bde_simple <- sum_rpt_bde %>%
+  ungroup() %>%
+  group_by(BDE) %>%
+  summarise(Requirements=max(na.omit(req_qty)),Forecasted=sum(na.omit(qty)),Issued=sum(na.omit(issued)),Expended=sum(na.omit(issued))-sum(na.omit(turned_in)))
+
+sum_rpt_bde$month <- factor(sum_rpt_bde$month, levels=c("october","november","december","january","february","march","april","may","june","july","august","september"))
+
+sum_rpt_bde <- sum_rpt_bde %>%
+  arrange(BDE,month) %>%
+  group_by(BDE) %>%
+  mutate(cum_fcst=cumsum(qty))
+#exp_month[12,3] <- exp_month[12,3] + exp_month[13,3]
+#exp_month[12,4] <- exp_month[12,4] + exp_month[13,4]
+#exp_month <- exp_month[-13,]
+
+sum_rpt_div <- forecast_UIC %>%
+  clean_names() %>%
+  replace(is.na(.), 0) %>%
+  mutate(sum = rowSums(.[6:17])) %>%
+  mutate(cat=str_sub(dodic,1,1)) %>%
+  left_join(hierarchy_list,by=c("macom"="hierarchy_level")) %>%
+  gather(key="month","quantity",october:september) %>%
+  group_by(month) %>%
+  summarise(qty=sum(na.omit(quantity))) %>%
+  mutate(req_qty=as.numeric(req_cat)) %>%
+  left_join(exp_month,by=c("month")) %>%
+  dplyr::arrange(factor(month,levels=c(c("october","november","december","january",
+                                             "february","march","april","may","june","july","august","september")))) %>%
+  mutate(percent=qty/req_qty) %>%
+  mutate(exp_pct=1-(turned_in/issued),cum_issue=cumsum(issued),cum_exp=cumsum(issued-turned_in),cum_percent=cum_exp/cum_issue)
+#cumsum(sum_rpt_div$qty)
+sum_rpt_div$month <- factor(sum_rpt_div$month, levels=c("october","november","december","january","february","march","april","may","june","july","august","september"))
+
+
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+ggpie_chart <- function(df,columns=3){
+  
+  dodic_plot <- ggplot(df,aes(x="",y=Quantity,fill=factor(Status,levels = c("Issued","Requested","Forecasted","Remaining Unforecasted"))))
+  return(dodic_plot + geom_bar(stat="identity",position = position_fill()) +
+           coord_polar(theta="y") +
+           facet_wrap(Description~.,ncol = columns) +
+           theme(axis.text = element_blank(),
+                 axis.ticks = element_blank(),
+                 panel.grid  = element_blank()) +
+           geom_text(aes(label=format(Quantity,big.mark = ",",scientific = F)),position=position_fill(vjust=0.5),size=4) +
+           theme(strip.text.x = element_text(size=8)) +
+           scale_fill_manual("",breaks=c("Issued","Requested","Forecasted","Remaining Unforecasted"),
+                             values=c("Issued"="firebrick","Requested"="darkorange","Forecasted"="olivedrab","Remaining Unforecasted"="forestgreen"))
+  )
+  }
+
+```
+The graph below depicts the current forecasts, issued ammo amounts, and expended ammo quantities.  The dots represent the monthly amounts and the line represents the cumulative amount.  The current requirement for the division is **`r format(req_cat$req_qty, big.mark=",", scientific=FALSE)`**.  The division has forecasted **`r format(sum(sum_rpt_div$qty),big.mark=",",scientific=FALSE)`** pieces of ammunition (`r percent(sum(sum_rpt_div$qty)/req_cat$req_qty)` of the annual requirement).  The dashed line is the annual requirement divided across each month.
+
+The division has issued **`r format(max(na.omit(sum_rpt_div$cum_issue)),big.mark=",",scientific=FALSE)`** pieces of ammunition and has expended **`r format(max(na.omit(sum_rpt_div$cum_exp)),big.mark=",",scientific=FALSE)`**.
+
+### Summary Graph {.tabset}
+
+#### Division
+
+```{r echo=FALSE, warning=FALSE, message=FALSE,fig.height=4}
+
+sum_rpt_div_plot_total <- ggplot(sum_rpt_div,aes(x=month,y=qty,label=percent(exp_pct)))
+sum_rpt_div_plot_total + geom_point(aes(color="Forecasted")) + 
+  geom_line(data=sum_rpt_div,aes(x=month,y=cumsum(qty),group=1,color="Forecasted"),size=1) + 
+  geom_line(data=sum_rpt_div,aes(x=month,y=cumsum(issued),group=1,color="Issued"),size=1) + 
+  geom_line(data=sum_rpt_div,aes(x=month,y=cumsum(issued-turned_in),group=1,color="Expended"),size=1) + 
+  #geom_hline(yintercept=max(sum_rpt_div$req_qty)/12,linetype="dashed") +
+  scale_y_continuous(limits = c(0,max(cumsum(sum_rpt_div$qty)))) + 
+  geom_abline(slope = max(sum_rpt_div$req_qty)/12,intercept = 0,color="black",linetype="dashed") + 
+  geom_point(data=sum_rpt_div,aes(x=month,y=issued,color="Issued")) + 
+  geom_point(data=sum_rpt_div,aes(x=month,y=issued-turned_in,color="Expended")) + 
+  labs(title="Forecasts by Month") + 
+  
+  scale_y_continuous(name="Quantity", labels = comma) +
+  scale_colour_manual("", 
+                      breaks = c("Forecasted", "Issued", "Expended"),
+                      values = c("Forecasted"="black", "Issued"="red4", 
+                                 "Expended"="green4")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) 
+```
+
+#### Brigades
+
+```{r echo=FALSE, warning=FALSE, message=FALSE,fig.height=8}
+
+sum_rpt_bde_plot_total <- ggplot(sum_rpt_bde,aes(x=month,y=qty,label=percent(exp_pct),group=BDE))
+sum_rpt_bde_plot_total + geom_point(aes(color="Forecasted"),size=1) + 
+  geom_line(data=sum_rpt_bde,aes(x=month,y=cum_fcst,group=BDE,color="Forecasted"),size=.5) + 
+  geom_line(data=sum_rpt_bde,aes(x=month,y=cum_issue,group=BDE,color="Issued"),size=.5) + 
+  geom_line(data=sum_rpt_bde,aes(x=month,y=cum_exp,group=BDE,color="Expended"),size=.5) + 
+  #geom_hline(yintercept=max(sum_rpt_div$req_qty)/12,linetype="dashed") +
+  scale_y_continuous(limits = c(0,max(cumsum(sum_rpt_bde$qty)))) + 
+  geom_abline(aes(slope = (req_qty)/12,intercept = 0),color="black",linetype="dashed") + 
+  geom_point(data=sum_rpt_bde,aes(x=month,y=issued,color="Issued"),size=1) + 
+  geom_point(data=sum_rpt_bde,aes(x=month,y=issued-turned_in,color="Expended"),size=1) + 
+  labs(title="Forecasts by Month") + 
+  scale_y_continuous(name="Quantity", labels = comma) +
+  scale_colour_manual("", 
+                      breaks = c("Forecasted", "Issued", "Expended"),
+                      values = c("Forecasted"="black", "Issued"="red4", 
+                                 "Expended"="green4")) +
+  facet_wrap(.~BDE,ncol = 2,scales = "free") +
+  theme(legend.position="none") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+### Brigade Data {.tabset}
+
+#### Table Data
+
+The table below shows the current ammo status by brigade.
+
+```{r echo=FALSE,warning=FALSE,message=FALSE}
+
+knitr::kable(sum_rpt_bde_simple, format.args = list(big.mark=","))
+```
+
+#### Document Status
+
+```{r doc_report, echo=FALSE,warning=FALSE,message=FALSE}
+
+real_docs_table <- real_docs_sum %>%
+  spread(doc_status,count,fill=0)
+
+colnames(real_docs_table)[1] <- "BDE"
+
+knitr::kable(real_docs_table, format.args = list(big.mark=","))
+
+```
+
+#### Forecasted
+
+The graph below is forecasted ammo.
+```{r forecast_tree, echo=FALSE,warning=FALSE,message=FALSE,fig.height=8}
+treplot <- ggplot(sum_rpt_bde,aes(area=qty,fill=BDE,subgroup=BDE))
+treplot + geom_treemap(aes(alpha=qty)) +
+  geom_treemap_subgroup_text(color="black") +
+  geom_treemap_subgroup_border(color="black") +
+  geom_treemap_text(aes(label=format(qty,big.mark = ",",scientific = F)), place="center") +
+  geom_treemap_text(aes(label=month), place="topleft",alpha=.5) +
+  scale_fill_brewer(type="qual",palette = "Set1") +
+  scale_alpha_continuous(range=c(.25,1)) +
+  theme(legend.position = "none")
+
+```
+
+#### BN Forecasts
+
+```{r forecast_heat, echo=FALSE,warning=FALSE,message=FALSE,fig.height=12}
+hierarchy_list_bn <- hierarchy_list %>%
+  select(BN,BDE) %>%
+  distinct()
+
+forecast_summary <- forecast_UIC %>%
+  gather("Month","Quantity",October:September) %>%
+  group_by(FY,MACOM,Month) %>%
+  summarise(`Total Quantity`= sum(na.omit(Quantity))) %>%
+  mutate(`Total Quantity Thousands`= case_when(
+    `Total Quantity` < 1000 & `Total Quantity` > 0 ~ "< 1",
+    `Total Quantity` >= 1000 ~ as.character(round(`Total Quantity`/1000,digits = 0)),
+    `Total Quantity` == 0 ~ as.character(0)
+  )) %>%
+  mutate(CY = case_when(
+    Month %in% c("October","November","December") ~ FY,
+    TRUE ~ FY+1
+  )) %>%
+  mutate(Date = ceiling_date(dmy(paste("1",Month,CY,sep=" ")),unit="month")-days(1)) %>%
+  left_join(hierarchy_list_bn, by=c("MACOM"="BN")) %>%
+  mutate(Class=case_when(
+    Date <= Sys.Date() ~ "Past",
+    Date <= Sys.Date() +months(3) & Date > Sys.Date() ~ "Locked",
+    Date > Sys.Date() + months(3) ~ "Open",
+    TRUE ~ "ERROR DAWG"
+  )) %>%
+  mutate(Scale = `Total Quantity`/max(`Total Quantity`)-min(`Total Quantity`))
+
+forecast_summary[forecast_summary==0] <- NA
+
+
+forecast_summary_plot <- ggplot(forecast_summary,aes(x=floor_date(Date,unit="month"),y=MACOM,fill=Scale,color=Class,group=BDE))
+forecast_summary_plot + geom_tile(size=1) +
+  geom_text(aes(label=`Total Quantity Thousands`),color="white",size=3) +
+  scale_fill_gradient(name="",low = "dodgerblue",high = "dodgerblue",na.value = "grey25",guide=F) +
+  scale_colour_manual(name="Forcasting Status",values=c("Open" = "green3","Locked" = "red","Past" = "black")) +
+  facet_wrap(BDE~.,scales="free",ncol=1) +
+  xlab("Forecasted Month") +
+  ggtitle("Forecasts by Month",subtitle = "1:1000 Scaled Quantities")
+```
+
+#### Issued
+
+```{r issue_tree, echo=F,warning=F,message=F,fig.height=8}
+treplot_issued <- ggplot(sum_rpt_bde,aes(area=issued,fill=BDE,subgroup=BDE))
+treplot_issued + geom_treemap(aes(alpha=issued)) +
+  geom_treemap_subgroup_text(color="black") +
+  geom_treemap_subgroup_border(color="black") +
+  geom_treemap_text(aes(label=format(issued,big.mark = ",",scientific = F)), place="center") +
+  geom_treemap_text(aes(label=month), place="topleft",alpha=.5) +
+  scale_fill_brewer(type="qual",palette = "Set1") +
+  scale_alpha_continuous(range=c(.75,1)) +
+  theme(legend.position = "none")
+```
+
+#### Turned In
+
+```{r ti_tree, echo=F,warning=F,message=F,fig.height=8}
+treplot_ti <- ggplot(sum_rpt_bde,aes(area=turned_in,fill=BDE,subgroup=BDE))
+treplot_ti + geom_treemap(aes(alpha=turned_in)) +
+  geom_treemap_subgroup_text(color="black") +
+  geom_treemap_subgroup_border(color="black") +
+  geom_treemap_text(aes(label=format(turned_in,big.mark = ",",scientific = F)), place="center") +
+  geom_treemap_text(aes(label=month), place="topleft",alpha=.5) +
+  scale_fill_brewer(type="qual",palette = "Set1") +
+  scale_alpha_continuous(range=c(.75,1)) +
+  theme(legend.position = "none")
+```
+
+### DODIC Information {.tabset}
+
+#### Small Arms
+The current Division small arms DODIC status:
+
+```{r small_arms_pie, echo=FALSE,warning=FALSE,message=FALSE,fig.height=8}
+
+print(ggpie_chart(sum_rpt_dodic_bang,columns=3))
+
+```
+
+#### Explosive
+The current Division mortars, artillery, and explosives DODIC status:
+
+```{r explosives_pie, echo=FALSE,warning=FALSE,message=FALSE,fig.height=8}
+
+print(ggpie_chart(sum_rpt_dodic_boom,columns = 3))
+
+```
+
+#### Rockets/Missiles/AVN
+The current Division aviation specific, rocket, and ATGM DODIC status:
+
+```{r aviation_pie, echo=FALSE,warning=FALSE,message=FALSE,fig.height=8}
+
+print(ggpie_chart(sum_rpt_dodic_bird,columns = 3))
+
+```
+
+```{r echo=F,warning=F,message=F}
+expenditure_report19 <- expenditure_report %>%
+  left_join(reconciled,by=c("document_number"="doc_num")) %>%
+  left_join(reconciled,by=c("issue_document_number"="doc_num")) %>%
+  filter(doc_status.x %in% "Reconciled" | doc_status.x %in% "Closed" | doc_status.y %in% "Reconciled" | doc_status.y %in% "Closed") %>%
+  select(-one_of(c("doc_status.x","doc_status.y")))
+
+exp_report <- expenditure_report18 %>%
+  bind_rows(expenditure_report17) %>%
+  bind_rows(expenditure_report16) %>%
+  bind_rows(expenditure_report19) %>% #Comment this line out to not include current FY data
+  left_join(hierarchy_list,by="hierarchy_level")
+
+exp_issue_hist <- exp_report %>%
+  clean_names() %>%
+  filter(expenditure_type=="I") %>%
+  group_by(fiscal_year,asp,bde,hierarchy_level,document_number,dpa,last_modified) %>%
+  summarise(IssueQty=sum(na.omit(quantity)),IssuePrice=sum(na.omit(total_price))) %>%
+  distinct() %>%
+  ungroup()
+
+exp_ti_hist <- exp_report %>%
+  clean_names() %>%
+  filter(expenditure_type=="T") %>%
+  group_by(fiscal_year,asp,bde,hierarchy_level,issue_document_number,dpa) %>%
+  summarise(TIQty=abs(sum(na.omit(quantity))),TIPrice=abs(sum(na.omit(total_price)))) %>%
+  distinct() %>%
+  ungroup()
+
+exp_docnum_hist <- exp_issue_hist %>%
+  left_join(exp_ti_hist,by=c("document_number"="issue_document_number","dpa")) %>%
+  distinct() %>%
+  replace_na(list(TIQty=0,TIPrice=0)) %>%
+  mutate(TIPct = TIQty/IssueQty) %>%
+  mutate(mth=floor_date(last_modified,unit="month"))
+
+# exp_examine<- arrange(exp_docnum_hist,asp.x,mth) %>%
+#   filter(asp.x=="SPOL") %>%
+#   group_by(mth) %>%
+#   summarise(issuesum=sum(IssueQty),tisum=sum(TIQty))
+  
+exp_summary_asp_month <- exp_docnum_hist %>%
+  ungroup() %>%
+  group_by(mth,asp.x) %>%
+  filter(asp.x %in% "SDRM" | asp.x %in% "SPOL") %>%  # Filters out extraneous ASPs
+  summarise(IssueSum=abs(sum(IssueQty)),TISum=abs(sum(TIQty)),Percent=1-TISum/IssueSum)
+
+exp_summary_totals_asp_month <- exp_docnum_hist %>%
+  ungroup() %>%
+  group_by(mth,asp.x) %>%
+  filter(asp.x %in% "SDRM" | asp.x %in% "SPOL") %>%
+  summarise(IssueSum=abs(sum(IssueQty)),TISum=abs(sum(TIQty)),Percent=TISum/IssueSum) %>%
+  mutate(ExpSum=IssueSum-TISum)
+
+
+exp_summary_totals <- exp_docnum_hist %>%
+  ungroup() %>%
+  group_by(mth) %>%
+  summarise(IssueSum=abs(sum(IssueQty)),TISum=abs(sum(TIQty)),Percent=TISum/IssueSum) %>%
+  mutate(ExpSum=IssueSum-TISum,roll_percent=zoo::rollapply(ExpSum,width=3,FUN=sum,na.rm=T,fill=NA,align="right")/zoo::rollapply(IssueSum,width=3,FUN=sum,na.rm=T,fill=NA,align="right"))
+
+exp_summary_totals_bde <- exp_docnum_hist %>%
+  ungroup() %>%
+  group_by(bde.x,mth) %>%
+  summarise(IssueSum=abs(sum(IssueQty)),TISum=abs(sum(TIQty)),Percent=TISum/IssueSum) %>%
+  mutate(ExpSum=IssueSum-TISum,roll_percent=zoo::rollapply(ExpSum,width=3,FUN=sum,na.rm=T,fill=NA,align="right")/zoo::rollapply(IssueSum,width=3,FUN=sum,na.rm=T,fill=NA,align="right")) %>%
+  ungroup() %>%
+  group_by(bde.x) %>%
+  mutate(scale=max(IssueSum))
+
+exp_summary_totals_year <- exp_docnum_hist %>%
+  ungroup() %>%
+  group_by(fiscal_year.x) %>%
+  summarise(IssueSum=abs(sum(IssueQty)),TISum=abs(sum(TIQty)),Percent=TISum/IssueSum) %>%
+  mutate(ExpSum=IssueSum-TISum,ExpPercent=ExpSum/IssueSum) %>%
+  gather("Type","Quantity",IssueSum,ExpSum)
+
+exp_summary_totals_year_bde <- exp_docnum_hist %>%
+  ungroup() %>%
+  group_by(bde.x,fiscal_year.x) %>%
+  summarise(IssueSum=abs(sum(IssueQty)),TISum=abs(sum(TIQty)),Percent=TISum/IssueSum) %>%
+  mutate(ExpSum=IssueSum-TISum,ExpPercent=ExpSum/IssueSum,scale_max=max(IssueSum)*1.2,scale_mid=ExpSum*.6) %>%
+  gather("Type","Quantity",IssueSum,ExpSum)
+
+exp_summary_totals_year_pct <- exp_summary_totals_year %>%
+  select(fiscal_year.x,Percent,ExpPercent) %>%
+  distinct()
+```
+
+## Historical Data
+
+### Expenditure Rates {.tabset}
+
+#### Division
+
+Below is the past 3 years of issued ammunition vs. ammunition actually expended.  Ammo not expended was returned unfired to the ASP.
+
+```{r issued_expended_div, echo=F,warning=F,message=F}
+
+year_total <- ggplot(exp_summary_totals_year,aes(x=fiscal_year.x,y=Quantity,group=Type))
+year_total + geom_bar(stat="identity",position="dodge",aes(fill=Type),size=1,alpha=.75) + 
+  ggtitle("Ammo Issued vs. Expended") +
+  xlab("Fiscal Year") +
+  scale_y_continuous(limits=c(0,max(exp_summary_totals_year$Quantity)),labels=comma) +
+  geom_text(stat="identity",aes(label=format(Quantity, big.mark=",", scientific=FALSE)),
+            position=position_dodge(width = 1),vjust=-.5,size=4) +
+  geom_label(data=exp_summary_totals_year_pct,aes(x=fiscal_year.x,y=(.8*subset(exp_summary_totals_year,Type=="ExpSum",select=Quantity)$Quantity),
+                                                  label=percent(1-Percent),group=1),size=4) +
+  scale_fill_manual("legend", labels=c("Expended","Issued"),values = c("ExpSum" = "green4", "IssueSum" = "red4")) +
+  theme_bw()
+
+```
+
+#### Brigades
+
+Below is the past 3 years of issued ammunition vs. ammunition actually expended.  Ammo not expended was returned unfired to the ASP.
+
+```{r issued_expended_bde, echo=F,warning=F,message=F,fig.height=8}
+
+year_total_bde <- ggplot(exp_summary_totals_year_bde,aes(x=fiscal_year.x,y=Quantity,group=Type))
+year_total_bde + geom_bar(stat="identity",position="dodge",aes(fill=Type),size=1,alpha=.75) +
+  ggtitle("Ammo Issued vs. Expended") +
+  xlab("Fiscal Year") +
+  scale_y_continuous(labels=comma) +
+  geom_text(stat="identity",aes(label=format(Quantity, big.mark=",", scientific=FALSE)),
+            position=position_dodge(width = 1),vjust=-.5,size=4) +
+  geom_label(aes(x=fiscal_year.x,y=scale_mid,label=percent(ExpPercent)),size=4) +
+  scale_fill_manual("legend", labels=c("Expended","Issued"),values = c("ExpSum" = "green4", "IssueSum" = "red4")) +
+  theme_bw() +
+  facet_wrap(~bde.x,ncol = 2,scales = "free_y") +
+  geom_blank(aes(y=scale_max)) 
+
+```
+
+```{r year_percents, eval=FALSE, include=FALSE,}
+
+exp_sum_plot <- exp_summary_totals_year_pct %>%
+  filter(fiscal_year.x!=2019) 
+percent_plot <- ggplot(exp_sum_plot,aes(x=fiscal_year.x,y=Percent))
+
+
+percent_plot + geom_point(aes(color="Percent")) +
+  geom_ribbon(aes(ymin=.4,ymax=Percent,fill="Percent"),alpha=.5) +
+  scale_y_continuous(limits = c(.4,.6)) +
+  scale_x_continuous(breaks = c(2016,2017,2018),limits = c(2015.75,2018.25)) +
+  xlab("Fiscal Year") +
+  ylab("Percent") +
+  geom_label(aes(label=percent(Percent)),vjust=-1) +
+  scale_fill_manual("legend", labels=c("Returned"),values = c("Percent" = "red4")) +
+  scale_color_manual("legend", labels=c("Returned"),values = c("Percent" = "red4")) +
+  ggtitle("Ammo Return Rates",subtitle = "% of Total Issued") +
+  theme_bw()
+
+
+```
+Monthly breakdown of ammunition issued vs. expended.  The green dots represent the quantities of ammunition expended per month and the red dots represent the quantities issued per month.  The black line is a 3 month rolling average of expenditure percentages.
+
+### Monthly Consumption {.tabset}
+
+#### Division
+```{r div_hist, echo=F,warning=F,message=F}
+month_total_div <- ggplot(exp_summary_totals,aes(x=mth))
+month_total_div + geom_segment(aes(xend=mth,y=ExpSum,yend=IssueSum),color="red4") +
+  geom_point(aes(y=IssueSum),color="red4") +
+  geom_point(aes(y=ExpSum),color="green4") +
+  geom_ribbon(aes(x=mth,ymin=0,ymax=ExpSum),fill="green4",alpha=.5) +
+  geom_path(aes(x=mth,y=max(IssueSum)*roll_percent)) +
+  ggtitle("Ammo Issued vs. Expended") +
+  xlab("Calendar Year") +
+  ylab("Quantity") +
+  scale_y_continuous(labels=comma,sec.axis = sec_axis(~./max(exp_summary_totals$IssueSum),name="% Expended (3 mo. Rolling Avg.)",labels=percent_format())) +
+  #geom_smooth(aes(y=ExpSum),span=.8,se=FALSE) +
+  #geom_smooth(aes(y=IssueSum),span=.8,se=FALSE) +
+  theme_bw()
+
+```
+
+#### Brigades
+
+```{r bde_hist, echo=F,warning=F,message=F,fig.height=8}
+month_total_bde <- ggplot(exp_summary_totals_bde,aes(x=mth))
+month_total_bde + geom_segment(aes(xend=mth,y=ExpSum,yend=IssueSum),color="red4") +
+  geom_point(aes(y=IssueSum),color="red4",size=.75) +
+  geom_point(aes(y=ExpSum),color="green4",size=.75) +
+  geom_ribbon(aes(x=mth,ymin=0,ymax=ExpSum),fill="green4",alpha=.5) +
+  geom_line(aes(x=mth,y=scale*roll_percent)) +
+  ggtitle("Ammo Issued vs. Expended") +
+  xlab("Calendar Year") +
+  ylab("Quantity") +
+  
+  #geom_smooth(aes(y=ExpSum),span=.8,se=FALSE) +
+  #geom_smooth(aes(y=IssueSum),span=.8,se=FALSE) +
+  theme_bw() +
+  facet_wrap(~bde.x,ncol=2,scales = "free") +
+  scale_y_continuous(labels=comma)
+
+```
